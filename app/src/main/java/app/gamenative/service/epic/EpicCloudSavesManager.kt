@@ -17,6 +17,12 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import timber.log.Timber
+import kotlin.io.path.Path
+import kotlin.io.path.absolutePathString
+import kotlin.io.path.exists
+import kotlin.io.path.isDirectory
+import kotlin.io.path.listDirectoryEntries
+import kotlin.io.path.name
 
 /**
  * Manages Epic Cloud Saves - downloading and uploading save files
@@ -1193,20 +1199,8 @@ object EpicCloudSavesManager {
             "{appname}" to game.appName,
         )
 
-        // Map to Wine prefix paths (like GOG does)
-        // Check for both proper casing (AppData) and legacy lowercase (appdata)
-        val usersPath = File(winePrefix, "drive_c/users/$user")
-        val appDataDir = when {
-            File(usersPath, "AppData").exists() -> "AppData"
-            File(usersPath, "appdata").exists() -> "appdata"
-            File(usersPath, "appData").exists() -> "appData"
-            else -> "AppData" // Default to proper Windows casing
-        }
-
-        Timber.tag("Epic").d("[Cloud Saves] Using AppData directory name: $appDataDir")
-
-        val appDataPath = File(winePrefix, "drive_c/users/$user/$appDataDir/Local").absolutePath
-        val appDataRoamingPath = File(winePrefix, "drive_c/users/$user/$appDataDir/Roaming").absolutePath
+        val appDataPath = File(winePrefix, "drive_c/users/$user/AppData/Local").absolutePath
+        val appDataRoamingPath = File(winePrefix, "drive_c/users/$user/AppData/Roaming").absolutePath
         val documentsPath = File(winePrefix, "drive_c/users/$user/Documents").absolutePath
         val savedGamesPath = File(winePrefix, "drive_c/users/$user/Saved Games").absolutePath
 
@@ -1252,7 +1246,8 @@ object EpicCloudSavesManager {
             }
         }
 
-        val finalPath = File(normalizedParts.joinToString("/"))
+        val resolvedWinePath: String = resolveCaseInsensitivity(normalizedParts.joinToString("/"))
+        val finalPath = File(resolvedWinePath)
 
         // Check subdirectories for save files
         // Some games store saves in user-specific subdirectories (e.g., "0/", "1/", etc.)
@@ -1278,7 +1273,7 @@ object EpicCloudSavesManager {
             }
 
             // Always check for subdirectories with files
-            val subDirs = finalPath.listFiles { it -> it.isDirectory } ?: emptyArray()
+            val subDirs = finalPath.listFiles { it.isDirectory } ?: emptyArray()
             val dirWithFiles = subDirs.firstOrNull { subDir ->
                 subDir.listFiles()?.any { it.isFile } == true
             }
@@ -1298,6 +1293,41 @@ object EpicCloudSavesManager {
         Timber.tag("Epic").d("[Cloud Saves]   Resolved: ${actualPath.absolutePath}")
 
         return actualPath
+    }
+
+    // Resolve a path case insensitively if there's no direct casing match
+    private fun resolveCaseInsensitivity(path: String): String {
+        val pathParts = path.replace("\\", "/").split("/")
+        var currentPath = Path("/")
+
+        for (segment in pathParts) {
+            // If we're at a place where the current path doesn't exist,
+            // just resolve as-is and continue
+            if (!currentPath.exists() || !currentPath.isDirectory()) {
+                currentPath = currentPath.resolve(segment)
+                continue
+            }
+
+            // Avoid directory traversal if possible by trying to directly resolve
+            val exactMatchPath = currentPath.resolve(segment)
+            if (exactMatchPath.exists()) {
+                currentPath = exactMatchPath
+                continue
+            }
+
+            val match = try {
+                currentPath.listDirectoryEntries().firstOrNull {
+                    it.name.equals(segment, ignoreCase = true)
+                }
+            } catch (_: Exception) {
+                null
+            }
+
+            // Use matched casing if not, otherwise fallback to requested casing
+            currentPath = match ?: currentPath.resolve(segment)
+        }
+
+        return currentPath.absolutePathString()
     }
 
     private fun getSyncTimestamp(context: Context, appId: Int): String? {
